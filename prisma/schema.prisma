@@ -1,0 +1,151 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Status {
+  PENDING_APPROVAL
+  REJECTED
+  PROVISIONED
+  PROVISION_FAILED
+  OFFBOARD_SCHEDULED
+  DISABLED
+}
+
+enum AccessStatus {
+  OPEN
+  APPROVED
+  DENIED
+  FULFILLED
+}
+
+enum Priority {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+// Job role -> AD security groups. Drives least-privilege, consistent access.
+model RoleTemplate {
+  id         String    @id @default(cuid())
+  name       String    @unique
+  department String
+  adGroups   String[]
+  requests   Request[]
+}
+
+model Request {
+  id             String       @id @default(cuid())
+  status         Status       @default(PENDING_APPROVAL)
+  firstName      String
+  lastName       String
+  username       String       @unique
+  email          String
+  department     String
+  jobTitle       String
+  startDate      DateTime
+  roleTemplate   RoleTemplate @relation(fields: [roleTemplateId], references: [id])
+  roleTemplateId String
+  requestedBy    String
+  approvedBy     String?
+  rejectionNote  String?
+  failureNote    String?
+  createdAt      DateTime     @default(now())
+  approvedAt     DateTime?
+  provisionedAt  DateTime?
+  // Offboarding SLA: dueDisableAt is the deadline, disabledAt is when it actually happened
+  dueDisableAt   DateTime?
+  disabledAt     DateTime?
+  events         AuditEvent[]
+  documents      Document[]
+}
+
+// Append-only. This table is the feed for the warehouse / Power BI ETL.
+model AuditEvent {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+  actor     String
+  actorRole String
+  action    String
+  requestId String?
+  request   Request? @relation(fields: [requestId], references: [id])
+  accessRequestId String?
+  accessRequest   AccessRequest? @relation(fields: [accessRequestId], references: [id])
+  detail    String?
+
+  @@index([createdAt])
+  @@index([action])
+  @@index([accessRequestId])
+}
+
+// Ticket-style request for extra access (an AD group) for an existing employee.
+// Requested by HR/Manager -> approved by a different Manager -> fulfilled by IT.
+model AccessRequest {
+  id           String          @id @default(cuid())
+  number       Int             @unique @default(autoincrement())
+  title        String
+  description  String
+  employee     String
+  groupName    String
+  priority     Priority        @default(MEDIUM)
+  status       AccessStatus    @default(OPEN)
+  requestedBy  String
+  decidedBy    String?
+  decisionNote String?
+  decidedAt    DateTime?
+  fulfilledBy  String?
+  fulfilledAt  DateTime?
+  failureNote  String?
+  createdAt    DateTime        @default(now())
+  comments     AccessComment[]
+  events       AuditEvent[]
+
+  @@index([status])
+}
+
+model AccessComment {
+  id              String        @id @default(cuid())
+  accessRequestId String
+  accessRequest   AccessRequest @relation(fields: [accessRequestId], references: [id], onDelete: Cascade)
+  author          String
+  authorRole      String        @default("")
+  body            String
+  createdAt       DateTime      @default(now())
+}
+
+// HR paperwork vault. File bytes live encrypted (AES-256-GCM) on a Docker volume; only metadata is in Postgres.
+model Document {
+  id           String      @id @default(cuid())
+  requestId    String
+  request      Request     @relation(fields: [requestId], references: [id])
+  category     String
+  originalName String
+  mimeType     String
+  size         Int
+  storedName   String      @unique
+  sha256       String
+  uploadedBy   String
+  createdAt    DateTime    @default(now())
+  deletedAt    DateTime?
+  shares       ShareLink[]
+
+  @@index([requestId])
+}
+
+// Expiring, download-limited link. Still requires a signed-in OnboardIQ user.
+model ShareLink {
+  id           String    @id @default(cuid())
+  token        String    @unique
+  documentId   String
+  document     Document  @relation(fields: [documentId], references: [id])
+  createdBy    String
+  createdAt    DateTime  @default(now())
+  expiresAt    DateTime
+  maxDownloads Int
+  downloads    Int       @default(0)
+  revokedAt    DateTime?
+}
